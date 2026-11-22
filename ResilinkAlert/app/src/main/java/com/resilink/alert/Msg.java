@@ -26,15 +26,15 @@ final class Msg {
         return "?";
     }
 
-    /** kind: 1 DANGER, 2 EVACUATE, 3 HELP NEEDED, 0 none. down: id of a node that is down, 0 none. */
+    /** kind: 1 DANGER, 2 EVACUATE, 3 HELP NEEDED, 4 ATTENTION, 0 none. down: id of a node that is down, 0 none. */
     static boolean active(int kind, int down) {
-        return (kind >= 1 && kind <= 3) || down != 0;
+        return (kind >= 1 && kind <= 4) || down != 0;
     }
 
     /** Same colours as the bulbs: red = danger or evacuate, yellow = help or node down, green = calm. */
     static int colour(int kind, int down) {
         if (kind == 1 || kind == 2) return RED;
-        if (kind == 3 || down != 0) return YELLOW;
+        if (kind == 3 || kind == 4 || down != 0) return YELLOW;
         return GREEN;
     }
 
@@ -42,6 +42,7 @@ final class Msg {
         if (kind == 2) return "EVACUATE NOW";
         if (kind == 1) return "DANGER NEARBY";
         if (kind == 3) return "HELP NEEDED";
+        if (kind == 4) return "ATTENTION";
         if (down != 0) return "NODE DOWN";
         return "ALL CLEAR";
     }
@@ -59,6 +60,8 @@ final class Msg {
         } else if (kind == 3) {
             sb.append("Someone at ").append(nodeName(origin)).append(" needs help. ")
               .append("If you are close, go to them. City control has been told.");
+        } else if (kind == 4) {
+            sb.append("Attention notice from ").append(nodeName(origin)).append(". Stay alert and watch for updates.");
         } else if (down != 0) {
             sb.append(nodeName(down)).append(" has stopped responding. ")
               .append("The network is rerouting around it and City control has opened an inspection ticket. Stay alert.");

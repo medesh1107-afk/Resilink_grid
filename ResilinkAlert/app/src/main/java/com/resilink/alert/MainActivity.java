@@ -12,6 +12,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -34,7 +35,8 @@ public class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private RadioGroup group;
     private Button btnPerm, btnOverlay, btnFull, btnBattery, btnStart;
-    private TextView status, liveTitle, liveBody;
+    private TextView status, debug, liveTitle, liveBody;
+    private boolean startAfterPermission = false;
     private LinearLayout livePanel;
 
     private final Runnable tick = new Runnable() {
@@ -83,6 +85,10 @@ public class MainActivity extends Activity {
                 AlertEngine.village = id;
                 prefs.edit().putInt("village", id).apply();
                 AlertEngine.reset(MainActivity.this);
+                ScanService.heardMine = 0;
+                if (prefs.getBoolean("watching", false) && hasRuntime()) {
+                    startForegroundService(new Intent(MainActivity.this, ScanService.class));
+                }
             }
         });
         root.addView(group);
@@ -128,6 +134,9 @@ public class MainActivity extends Activity {
         root.addView(btnStart);
         status = text("", 16, false);
         root.addView(status);
+        debug = text("", 12, false);
+        debug.setTypeface(Typeface.MONOSPACE);
+        root.addView(debug);
 
         livePanel = new LinearLayout(this);
         livePanel.setOrientation(LinearLayout.VERTICAL);
@@ -188,6 +197,12 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        // Start the scan right after the user allowed Bluetooth, no second tap needed.
+        if (startAfterPermission && hasRuntime()) {
+            prefs.edit().putBoolean("watching", true).apply();
+            startForegroundService(new Intent(this, ScanService.class));
+        }
+        startAfterPermission = false;
         refresh();
     }
 
@@ -200,6 +215,7 @@ public class MainActivity extends Activity {
             prefs.edit().putBoolean("watching", false).apply();
         } else {
             if (!hasRuntime()) {
+                startAfterPermission = true;
                 requestRuntime();
                 return;
             }
@@ -212,8 +228,22 @@ public class MainActivity extends Activity {
     private boolean hasRuntime() {
         if (Build.VERSION.SDK_INT >= 31 && !granted(Manifest.permission.BLUETOOTH_SCAN)) return false;
         if (Build.VERSION.SDK_INT <= 30 && !granted(Manifest.permission.ACCESS_FINE_LOCATION)) return false;
-        if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)) return false;
-        return true;
+        return true;       // notifications are asked for too, but the scan does not depend on them
+    }
+
+    private boolean hasNotif() {
+        return Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS);
+    }
+
+    /** Android 10 and 11 deliver no BLE results while the phone's Location switch is off. */
+    private boolean locationSwitchOk() {
+        if (Build.VERSION.SDK_INT > 30) return true;
+        try {
+            LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+            return lm != null && lm.isLocationEnabled();
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     private boolean granted(String p) {
@@ -250,7 +280,7 @@ public class MainActivity extends Activity {
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         boolean okBattery = pm.isIgnoringBatteryOptimizations(getPackageName());
 
-        mark(btnPerm, "Allow Bluetooth and notifications", okPerm);
+        mark(btnPerm, "Allow Bluetooth and notifications", okPerm && hasNotif());
         mark(btnOverlay, "Allow show over other apps", okOverlay);
         mark(btnFull, "Allow full-screen alerts", okFull);
         mark(btnBattery, "Keep running in background", okBattery);
@@ -265,6 +295,10 @@ public class MainActivity extends Activity {
         String letter = Msg.letterOf(AlertEngine.village);
         if (!btOn) {
             status.setText("Bluetooth is OFF. Turn it on.");
+        } else if (watching && !okPerm) {
+            status.setText("Bluetooth permission is missing. Tap the Allow Bluetooth button.");
+        } else if (watching && !locationSwitchOk()) {
+            status.setText("Turn the phone's Location switch ON (Android 10/11 needs it for Bluetooth scanning).");
         } else if (!watching) {
             status.setText("Not watching. Tap START WATCHING.");
         } else if (AlertEngine.lastSeenMs == 0) {
@@ -277,6 +311,23 @@ public class MainActivity extends Activity {
                 status.setText("Hearing the Village " + letter + " node. Last signal " + age + " s ago.");
             }
         }
+
+        long nowMs = SystemClock.elapsedRealtime();
+        String last = ScanService.lastRl1Ms == 0 ? "never" : ((nowMs - ScanService.lastRl1Ms) / 1000) + " s ago";
+        debug.setText("DEBUG  service " + (ScanService.running ? "running" : "stopped")
+                + "
+scan: " + (ScanService.mode.isEmpty() ? "-" : ScanService.mode)
+                + "
+RL1 adverts heard: " + ScanService.heardRl1 + " (my village: " + ScanService.heardMine
+                + "), other BLE: " + ScanService.heardOther
+                + "
+last RL1: " + last + "  " + ScanService.lastDecoded
+                + "
+raw: " + (ScanService.lastRaw.isEmpty() ? "-" : ScanService.lastRaw)
+                + (ScanService.lastError.isEmpty() ? "" : "
+error: " + ScanService.lastError)
+                + (hasNotif() ? "" : "
+notifications not allowed (alerts still ring)"));
 
         int k = AlertEngine.kind, o = AlertEngine.origin, d = AlertEngine.down;
         int c = Msg.colour(k, d);

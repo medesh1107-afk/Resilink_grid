@@ -1,5 +1,6 @@
 package com.resilink.alert;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -17,13 +18,15 @@ import android.bluetooth.le.ScanSettings;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -36,9 +39,21 @@ public class ScanService extends Service {
     static final String CHANNEL = "resilink_watch";
     private static final int COMPANY_ID = 0xFFFF;
 
+    // ---- debug info shown on the main screen ----
+    static volatile int heardMine;           // RL1 adverts heard from the picked village
+    static volatile int heardRl1;            // RL1 adverts heard from any village
+    static volatile int heardOther;          // other BLE adverts seen (only grows while scanning unfiltered)
+    static volatile long lastRl1Ms;          // elapsedRealtime of the last RL1 advert, 0 = never
+    static volatile String lastRaw = "";     // hex of the whole scan record of the last RL1 advert
+    static volatile String lastDecoded = ""; // v k o d decoded from it
+    static volatile String lastError = "";   // last scan error / start problem
+    static volatile String mode = "";        // what kind of scan is running
+    static volatile boolean running;         // service alive
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BluetoothLeScanner scanner;
     private boolean scanning = false;
+    private boolean useFilter = true;        // loose hardware filter first, unfiltered as the fallback
     private long lastScanStart = 0;
     private long lastAnyAdvert = 0;
 
@@ -56,6 +71,7 @@ public class ScanService extends Service {
         @Override
         public void onScanFailed(int errorCode) {
             scanning = false;
+            lastError = "scan failed, code " + errorCode;
         }
     };
 
@@ -63,7 +79,7 @@ public class ScanService extends Service {
         @Override
         public void run() {
             ensureScanning();
-            handler.postDelayed(this, 8000);
+            handler.postDelayed(this, 5000);
         }
     };
 
@@ -84,11 +100,40 @@ public class ScanService extends Service {
                 .setOngoing(true)
                 .setContentIntent(pi)
                 .build();
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+
+        int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+        // Android 10 and 11 only deliver scan results to a background app if the service is a location service.
+        if (Build.VERSION.SDK_INT <= 30) type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+        try {
+            startForeground(1, n, type);
+        } catch (Exception e) {
+            lastError = "startForeground refused: " + e.getClass().getSimpleName() + " " + e.getMessage();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        running = true;
+        // Village may have changed: begin with a clean scan so the name filter is rebuilt.
+        stopScanQuietly();
+        useFilter = true;
 
         handler.removeCallbacks(watchdog);
         handler.post(watchdog);
         return START_STICKY;
+    }
+
+    private boolean canScan() {
+        String p = Build.VERSION.SDK_INT >= 31 ? Manifest.permission.BLUETOOTH_SCAN
+                : Manifest.permission.ACCESS_FINE_LOCATION;
+        return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @SuppressLint("MissingPermission")
+    private void stopScanQuietly() {
+        try {
+            if (scanner != null && scanning) scanner.stopScan(callback);
+        } catch (Exception ignored) {
+        }
+        scanning = false;
     }
 
     @SuppressLint("MissingPermission")
@@ -96,65 +141,120 @@ public class ScanService extends Service {
         BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = bm == null ? null : bm.getAdapter();
         if (adapter == null || !adapter.isEnabled()) {
-            scanning = false;           // Bluetooth is off, try again later
+            scanning = false;           // Bluetooth is off; the old scanner is dead, start fresh when it is back
+            lastError = "Bluetooth is off";
+            mode = "";
+            return;
+        }
+        if (!canScan()) {
+            stopScanQuietly();
+            lastError = "scan permission not granted";
+            mode = "";
             return;
         }
         long now = SystemClock.elapsedRealtime();
         if (scanning) {
-            // Nothing heard for a long time: restart the scan once in a while, in case Bluetooth was toggled.
-            if (now - lastAnyAdvert > 45000 && now - lastScanStart > 45000) {
-                try {
-                    if (scanner != null) scanner.stopScan(callback);
-                } catch (Exception ignored) {
-                }
-                scanning = false;
+            // Nothing heard for 20 s: restart, and flip between "loose filter" and "no filter" in case this
+            // phone's Bluetooth chip mishandles one of them. Unfiltered scans stop delivering when the screen
+            // is off (Android 8.1+), so the loose filter is the one that must work on a locked phone.
+            long quiet = now - Math.max(lastAnyAdvert, lastScanStart);
+            if (quiet > 20000) {
+                stopScanQuietly();
+                useFilter = !useFilter;
             } else {
                 return;
             }
         }
         try {
             scanner = adapter.getBluetoothLeScanner();
-            if (scanner == null) return;
-            ScanFilter filter = new ScanFilter.Builder()
-                    .setManufacturerData(COMPANY_ID,
-                            new byte[]{'R', 'L', '1'},
-                            new byte[]{(byte) 0xFF, (byte) 0xFF, (byte) 0xFF})
-                    .build();
+            if (scanner == null) {
+                lastError = "no BLE scanner yet (Bluetooth starting?)";
+                return;
+            }
             ScanSettings settings = new ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                    .setReportDelay(0)
                     .build();
-            scanner.startScan(Collections.singletonList(filter), settings, callback);
+            if (useFilter) {
+                // Loose on purpose: any manufacturer data with company id 0xFFFF (mask 0 = any bytes), or the
+                // advert name RESILINK-<letter>. The real check is done in handle().
+                List<ScanFilter> filters = new ArrayList<ScanFilter>();
+                filters.add(new ScanFilter.Builder()
+                        .setManufacturerData(COMPANY_ID, new byte[]{0}, new byte[]{0})
+                        .build());
+                filters.add(new ScanFilter.Builder()
+                        .setDeviceName("RESILINK-" + Msg.letterOf(AlertEngine.village))
+                        .build());
+                scanner.startScan(filters, settings, callback);
+                mode = "loose filter (id 0xFFFF or name)";
+            } else {
+                scanner.startScan(null, settings, callback);
+                mode = "NO filter (checked in code)";
+            }
             scanning = true;
             lastScanStart = now;
+            lastError = "";
         } catch (Exception e) {
             scanning = false;
+            lastError = "startScan: " + e.getClass().getSimpleName() + " " + e.getMessage();
         }
+    }
+
+    private static String hex(byte[] b) {
+        if (b == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < b.length; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(String.format("%02X", b[i] & 0xFF));
+        }
+        return sb.toString();
+    }
+
+    /** Index of the 'R' of the ASCII bytes R L 1 with at least 4 bytes after them, or -1. */
+    private static int findRl1(byte[] raw) {
+        if (raw == null) return -1;
+        for (int i = 0; i + 6 < raw.length; i++) {
+            if (raw[i] == 'R' && raw[i + 1] == 'L' && raw[i + 2] == '1') return i;
+        }
+        return -1;
     }
 
     private void handle(ScanResult result) {
         ScanRecord rec = result.getScanRecord();
         if (rec == null) return;
         byte[] d = rec.getManufacturerSpecificData(COMPANY_ID);
-        if (d == null || d.length < 7) return;
-        if (d[0] != 'R' || d[1] != 'L' || d[2] != '1') return;
+        int off = 0;
+        if (d == null || d.length < 7 || d[0] != 'R' || d[1] != 'L' || d[2] != '1') {
+            // Fallback: look for "RL1" anywhere in the raw advert, in case the parser did not split it as expected.
+            byte[] raw = rec.getBytes();
+            off = findRl1(raw);
+            if (off < 0) {
+                heardOther++;
+                return;
+            }
+            d = raw;
+        }
         lastAnyAdvert = SystemClock.elapsedRealtime();
-        int v = d[3] - '0';
-        int k = d[4] - '0';
-        int o = d[5] - '0';
-        int dn = d[6] - '0';
+        int v = d[off + 3] - '0';
+        int k = d[off + 4] - '0';
+        int o = d[off + 5] - '0';
+        int dn = d[off + 6] - '0';
+        heardRl1++;
+        lastRl1Ms = lastAnyAdvert;
+        lastRaw = hex(rec.getBytes());
+        lastDecoded = "v=" + v + " k=" + k + " o=" + o + " d=" + dn;
         if (v != AlertEngine.village) return;    // only the village the user picked
+        heardMine++;
+        if (k < 0 || k > 4 || o < 0 || o > 9 || dn < 0 || dn > 9) return;   // not a sane packet
         AlertEngine.update(getApplicationContext(), k, o, dn, false);
     }
 
-    @SuppressLint("MissingPermission")
     @Override
     public void onDestroy() {
         handler.removeCallbacks(watchdog);
-        try {
-            if (scanner != null && scanning) scanner.stopScan(callback);
-        } catch (Exception ignored) {
-        }
-        scanning = false;
+        stopScanQuietly();
+        running = false;
         super.onDestroy();
     }
 
