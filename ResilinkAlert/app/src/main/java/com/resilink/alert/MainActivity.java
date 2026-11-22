@@ -68,7 +68,7 @@ public class MainActivity extends Activity {
         group.setOrientation(RadioGroup.VERTICAL);
         for (int i = 0; i < Msg.LETTERS.length; i++) {
             RadioButton rb = new RadioButton(this);
-            rb.setText("Village " + Msg.LETTERS[i]);
+            rb.setText("Village " + Msg.LETTERS[i] + (Msg.hasBle(Msg.IDS[i]) ? "" : " (no Bluetooth: heard via B, C, D)"));
             rb.setTextSize(22);
             rb.setId(100 + i);
             rb.setPadding(dp(8), dp(10), dp(8), dp(10));

@@ -50,6 +50,10 @@ public class ScanService extends Service {
     static volatile String mode = "";        // what kind of scan is running
     static volatile boolean running;         // service alive
 
+    // Village A has no advert of its own: it listens to B, C and D and keeps its last alert for a short time.
+    private int aK, aO, aD;
+    private long aHoldUntil;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BluetoothLeScanner scanner;
     private boolean scanning = false;
@@ -244,10 +248,35 @@ public class ScanService extends Service {
         lastRl1Ms = lastAnyAdvert;
         lastRaw = hex(rec.getBytes());
         lastDecoded = "v=" + v + " k=" + k + " o=" + o + " d=" + dn;
-        if (v != AlertEngine.village) return;    // only the village the user picked
-        heardMine++;
         if (k < 0 || k > 4 || o < 0 || o > 9 || dn < 0 || dn > 9) return;   // not a sane packet
-        AlertEngine.update(getApplicationContext(), k, o, dn, false);
+        int mine = AlertEngine.village;
+        // Only problems of MY village are shown: an alert counts only if my village raised it,
+        // and a node-down notice only if it is my village that is down.
+        int ek = (k != 0 && o == mine) ? k : 0;
+        int eo = ek != 0 ? o : 0;
+        int ed = (dn == mine) ? dn : 0;
+        Context app = getApplicationContext();
+        if (Msg.hasBle(mine)) {
+            if (v != mine) return;               // only the advert of the village the user picked
+            heardMine++;
+            AlertEngine.update(app, ek, eo, ed, false);
+        } else {
+            // Village A: any node's advert may carry A's alert. Adverts that say nothing do not clear it
+            // until 10 s have passed, because another node may simply not have heard about it yet.
+            heardMine++;
+            long now = SystemClock.elapsedRealtime();
+            if (ek != 0 || ed != 0) {
+                aK = ek;
+                aO = eo;
+                aD = ed;
+                aHoldUntil = now + 10000;
+            } else if (now >= aHoldUntil) {
+                aK = 0;
+                aO = 0;
+                aD = 0;
+            }
+            AlertEngine.update(app, aK, aO, aD, false);
+        }
     }
 
     @Override

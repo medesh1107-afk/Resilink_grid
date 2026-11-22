@@ -10,6 +10,11 @@ final class Msg {
 
     static final int GREEN = 0, RED = 1, YELLOW = 2;
 
+    /** Village A is the sensor node and has no Bluetooth advert (BLE_ALERT 0). */
+    static boolean hasBle(int id) {
+        return id != 2;
+    }
+
     static String nodeName(int id) {
         switch (id) {
             case 1: return "City control";
