@@ -213,6 +213,7 @@ public class MainActivity extends Activity {
         if (watching) {
             stopService(new Intent(this, ScanService.class));
             prefs.edit().putBoolean("watching", false).apply();
+            AlertEngine.reset(this);
         } else {
             if (!hasRuntime()) {
                 startAfterPermission = true;
@@ -220,6 +221,7 @@ public class MainActivity extends Activity {
                 return;
             }
             prefs.edit().putBoolean("watching", true).apply();
+            AlertEngine.reset(this);      // forget "already shown / silenced" so the same alert rings again
             startForegroundService(new Intent(this, ScanService.class));
         }
         refresh();
