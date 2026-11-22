@@ -317,19 +317,13 @@ public class MainActivity extends Activity {
         long nowMs = SystemClock.elapsedRealtime();
         String last = ScanService.lastRl1Ms == 0 ? "never" : ((nowMs - ScanService.lastRl1Ms) / 1000) + " s ago";
         debug.setText("DEBUG  service " + (ScanService.running ? "running" : "stopped")
-                + "
-scan: " + (ScanService.mode.isEmpty() ? "-" : ScanService.mode)
-                + "
-RL1 adverts heard: " + ScanService.heardRl1 + " (my village: " + ScanService.heardMine
+                + "\nscan: " + (ScanService.mode.isEmpty() ? "-" : ScanService.mode)
+                + "\nRL1 adverts heard: " + ScanService.heardRl1 + " (my village: " + ScanService.heardMine
                 + "), other BLE: " + ScanService.heardOther
-                + "
-last RL1: " + last + "  " + ScanService.lastDecoded
-                + "
-raw: " + (ScanService.lastRaw.isEmpty() ? "-" : ScanService.lastRaw)
-                + (ScanService.lastError.isEmpty() ? "" : "
-error: " + ScanService.lastError)
-                + (hasNotif() ? "" : "
-notifications not allowed (alerts still ring)"));
+                + "\nlast RL1: " + last + "  " + ScanService.lastDecoded
+                + "\nraw: " + (ScanService.lastRaw.isEmpty() ? "-" : ScanService.lastRaw)
+                + (ScanService.lastError.isEmpty() ? "" : "\nerror: " + ScanService.lastError)
+                + (hasNotif() ? "" : "\nnotifications not allowed (alerts still ring)"));
 
         int k = AlertEngine.kind, o = AlertEngine.origin, d = AlertEngine.down;
         int c = Msg.colour(k, d);
